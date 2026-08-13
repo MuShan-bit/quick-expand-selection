@@ -569,7 +569,7 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
         return [
             {
                 type: "group",
-                heading: "Quick Expand Selection",
+                heading: "扩选规则",
                 items: [
                     {
                         name: "说明",
@@ -612,7 +612,7 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
         new obsidian.Setting(containerEl)
-            .setName("Quick Expand Selection")
+            .setName("扩选规则")
             .setHeading();
         containerEl.createEl("p", {
             text: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。",
