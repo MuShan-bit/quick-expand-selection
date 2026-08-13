@@ -1,0 +1,10 @@
+{
+  "id": "quick-expand-selection",
+  "name": "Quick Expand Selection",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Expand and shrink text selections with Markdown-aware, configurable boundaries.",
+  "author": "MuShan-bit",
+  "authorUrl": "https://github.com/MuShan-bit",
+  "isDesktopOnly": false
+}
