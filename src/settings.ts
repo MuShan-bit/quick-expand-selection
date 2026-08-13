@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
 import type QuickExpandSelectionPlugin from "./main";
 import type { SelectionRules } from "./selection";
 
@@ -38,10 +38,57 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  override getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        type: "group",
+        heading: "Quick Expand Selection",
+        items: [
+          {
+            name: "说明",
+            desc: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。"
+          },
+          ...(Object.keys(RULE_DESCRIPTIONS) as Array<keyof SelectionRules>).map((key) => {
+            const description = RULE_DESCRIPTIONS[key];
+            return {
+              name: description.name,
+              desc: description.description,
+              aliases: ["扩选规则", "选择范围"],
+              control: {
+                type: "toggle" as const,
+                key: `rules.${key}`,
+                defaultValue: false
+              }
+            };
+          }),
+          {
+            name: "重置扩选历史",
+            desc: "清除当前编辑器中的扩选层级记录。",
+            action: () => this.plugin.clearSelectionHistory()
+          }
+        ]
+      }
+    ];
+  }
+
+  override getControlValue(key: string): unknown {
+    const rule = this.getRuleKey(key);
+    return rule ? this.plugin.settings.rules[rule] : undefined;
+  }
+
+  override async setControlValue(key: string, value: unknown): Promise<void> {
+    const rule = this.getRuleKey(key);
+    if (!rule || typeof value !== "boolean") return;
+    this.plugin.settings.rules[rule] = value;
+    await this.plugin.saveSettings();
+  }
+
   override display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Quick Expand Selection" });
+    new Setting(containerEl)
+      .setName("Quick Expand Selection")
+      .setHeading();
     containerEl.createEl("p", {
       text: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。",
       cls: "setting-item-description"
@@ -74,5 +121,13 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
           this.plugin.clearSelectionHistory();
         });
       });
+  }
+
+  private getRuleKey(key: string): keyof SelectionRules | null {
+    const prefix = "rules.";
+    if (!key.startsWith(prefix)) return null;
+
+    const rule = key.slice(prefix.length) as keyof SelectionRules;
+    return Object.prototype.hasOwnProperty.call(RULE_DESCRIPTIONS, rule) ? rule : null;
   }
 }
