@@ -6,7 +6,7 @@
   "scripts": {
     "build": "rollup --config rollup.config.mjs --environment BUILD:production",
     "dev": "rollup --config rollup.config.mjs --watch",
-    "test": "node --import tsx --test tests/**/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "keywords": [
     "obsidian",
