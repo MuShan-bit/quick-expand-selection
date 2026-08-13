@@ -35,14 +35,12 @@ export default class QuickExpandSelectionPlugin extends Plugin {
     this.addCommand({
       id: "expand-selection",
       name: "扩选文本",
-      hotkeys: [{ modifiers: ["Alt"], key: "ArrowUp" }],
       repeatable: true,
       editorCallback: (editor) => this.expand(editor)
     });
     this.addCommand({
       id: "shrink-selection",
       name: "缩选文本",
-      hotkeys: [{ modifiers: ["Alt"], key: "ArrowDown" }],
       repeatable: true,
       editorCallback: (editor) => this.shrink(editor)
     });
