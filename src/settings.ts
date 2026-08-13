@@ -41,7 +41,9 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
   override display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Quick Expand Selection" });
+    new Setting(containerEl)
+      .setName("Quick Expand Selection")
+      .setHeading();
     containerEl.createEl("p", {
       text: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。",
       cls: "setting-item-description"
