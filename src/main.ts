@@ -10,6 +10,7 @@ import {
   type SelectionState
 } from "./selection";
 import { QuickExpandSelectionSettingTab } from "./settings";
+import { getLocaleStrings } from "./i18n";
 
 interface QuickExpandSelectionSettings {
   rules: SelectionRules;
@@ -31,16 +32,17 @@ export default class QuickExpandSelectionPlugin extends Plugin {
   override async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new QuickExpandSelectionSettingTab(this.app, this));
+    const strings = getLocaleStrings();
 
     this.addCommand({
       id: "expand-selection",
-      name: "扩选文本",
+      name: strings.commands.expandSelection,
       repeatable: true,
       editorCallback: (editor) => this.expand(editor)
     });
     this.addCommand({
       id: "shrink-selection",
-      name: "缩选文本",
+      name: strings.commands.shrinkSelection,
       repeatable: true,
       editorCallback: (editor) => this.shrink(editor)
     });
@@ -69,7 +71,7 @@ export default class QuickExpandSelectionPlugin extends Plugin {
   clearSelectionHistory(): void {
     const editor = this.getActiveEditor();
     if (editor) this.historyByEditor.delete(editor);
-    new Notice("已重置扩选历史");
+    new Notice(getLocaleStrings().notices.expansionHistoryReset);
   }
 
   private getActiveEditor(): Editor | null {

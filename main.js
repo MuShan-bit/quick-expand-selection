@@ -530,57 +530,92 @@ function getDefaultSelectionRules() {
     return { ...DEFAULT_RULES };
 }
 
-const RULE_DESCRIPTIONS = {
-    whitespace: {
-        name: "空白字符",
-        description: "将连续空格、换行和制表符作为扩选边界。"
+const en = {
+    commands: {
+        expandSelection: "Expand selection",
+        shrinkSelection: "Shrink selection"
     },
-    punctuation: {
-        name: "标点和符号",
-        description: "将 Markdown 标记、标点和符号作为扩选边界。"
+    rules: {
+        whitespace: { name: "Whitespace", description: "Treat consecutive spaces, line breaks, and tabs as expansion boundaries." },
+        punctuation: { name: "Punctuation and symbols", description: "Treat Markdown markers, punctuation, and symbols as expansion boundaries." },
+        line: { name: "Paragraphs and lines", description: "Expand to the current line, then to consecutive paragraphs." },
+        list: { name: "List hierarchy", description: "Within a list, expand through list-item content and then the current list block." },
+        code: { name: "Code blocks", description: "Use IDE-style expansion inside fenced code blocks, including the whole code block." },
+        latex: { name: "LaTeX", description: "Recognize inline math, \\(...\\), \\[...\\], and $...$." },
+        heading: { name: "Heading hierarchy", description: "Expand the current heading, then the content under that heading." }
     },
-    line: {
-        name: "段落和整行",
-        description: "扩选到当前行，再扩选到连续的段落。"
+    settings: {
+        heading: "Expansion rules",
+        descriptionName: "About",
+        description: "Expand and shrink selection commands appear in Obsidian's Hotkeys settings. The rules below affect their expansion order.",
+        aliases: ["Expansion rules", "Selection range"],
+        resetHistory: "Reset expansion history",
+        resetHistoryDescription: "Clear the expansion history for the current editor.",
+        resetButton: "Reset"
     },
-    list: {
-        name: "列表层级",
-        description: "在列表中依次扩选列表项内容、当前列表块。"
-    },
-    code: {
-        name: "代码段",
-        description: "在 fenced code block 内按 IDE 风格扩选，并支持整个代码段。"
-    },
-    latex: {
-        name: "LaTeX",
-        description: "识别行级数学环境、\\(...\\)、\\[...\\] 和 $...$。"
-    },
-    heading: {
-        name: "标题层级",
-        description: "在标题中扩选当前标题，再扩选到该标题的内容区域。"
+    notices: {
+        expansionHistoryReset: "Expansion history reset."
     }
 };
+const zhCn = {
+    commands: {
+        expandSelection: "扩选文本",
+        shrinkSelection: "缩选文本"
+    },
+    rules: {
+        whitespace: { name: "空白字符", description: "将连续空格、换行和制表符作为扩选边界。" },
+        punctuation: { name: "标点和符号", description: "将 Markdown 标记、标点和符号作为扩选边界。" },
+        line: { name: "段落和整行", description: "扩选到当前行，再扩选到连续的段落。" },
+        list: { name: "列表层级", description: "在列表中依次扩选列表项内容、当前列表块。" },
+        code: { name: "代码段", description: "在 fenced code block 内按 IDE 风格扩选，并支持整个代码段。" },
+        latex: { name: "LaTeX", description: "识别行级数学环境、\\(...\\)、\\[...\\] 和 $...$。" },
+        heading: { name: "标题层级", description: "在标题中扩选当前标题，再扩选到该标题的内容区域。" }
+    },
+    settings: {
+        heading: "扩选规则",
+        descriptionName: "说明",
+        description: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。",
+        aliases: ["扩选规则", "选择范围"],
+        resetHistory: "重置扩选历史",
+        resetHistoryDescription: "清除当前编辑器中的扩选层级记录。",
+        resetButton: "重置"
+    },
+    notices: {
+        expansionHistoryReset: "已重置扩选历史"
+    }
+};
+function getLocale() {
+    const language = typeof obsidian.getLanguage === "function"
+        ? obsidian.getLanguage().toLowerCase().replace(/_/g, "-")
+        : "en";
+    return language === "zh" || language.startsWith("zh-") ? zhCn : en;
+}
+function getLocaleStrings() {
+    return getLocale();
+}
+
 class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
     constructor(app, plugin) {
         super(app, plugin);
         this.plugin = plugin;
     }
     getSettingDefinitions() {
+        const strings = getLocaleStrings();
         return [
             {
                 type: "group",
-                heading: "扩选规则",
+                heading: strings.settings.heading,
                 items: [
                     {
-                        name: "说明",
-                        desc: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。"
+                        name: strings.settings.descriptionName,
+                        desc: strings.settings.description
                     },
-                    ...Object.keys(RULE_DESCRIPTIONS).map((key) => {
-                        const description = RULE_DESCRIPTIONS[key];
+                    ...Object.keys(strings.rules).map((key) => {
+                        const description = strings.rules[key];
                         return {
                             name: description.name,
                             desc: description.description,
-                            aliases: ["扩选规则", "选择范围"],
+                            aliases: strings.settings.aliases,
                             control: {
                                 type: "toggle",
                                 key: `rules.${key}`,
@@ -589,8 +624,8 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
                         };
                     }),
                     {
-                        name: "重置扩选历史",
-                        desc: "清除当前编辑器中的扩选层级记录。",
+                        name: strings.settings.resetHistory,
+                        desc: strings.settings.resetHistoryDescription,
                         action: () => this.plugin.clearSelectionHistory()
                     }
                 ]
@@ -609,20 +644,21 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
     }
     display() {
+        const strings = getLocaleStrings();
         const { containerEl } = this;
         containerEl.empty();
         new obsidian.Setting(containerEl)
-            .setName("扩选规则")
+            .setName(strings.settings.heading)
             .setHeading();
         containerEl.createEl("p", {
-            text: "扩选和缩选命令会出现在 Obsidian 的快捷键设置中。下面的规则会影响扩选顺序。",
+            text: strings.settings.description,
             cls: "setting-item-description"
         });
         new obsidian.Setting(containerEl)
-            .setName("扩选规则")
+            .setName(strings.settings.heading)
             .setHeading();
-        Object.keys(RULE_DESCRIPTIONS).forEach((key) => {
-            const description = RULE_DESCRIPTIONS[key];
+        Object.keys(strings.rules).forEach((key) => {
+            const description = strings.rules[key];
             new obsidian.Setting(containerEl)
                 .setName(description.name)
                 .setDesc(description.description)
@@ -636,10 +672,10 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
             });
         });
         new obsidian.Setting(containerEl)
-            .setName("重置扩选历史")
-            .setDesc("清除当前编辑器中的扩选层级记录。")
+            .setName(strings.settings.resetHistory)
+            .setDesc(strings.settings.resetHistoryDescription)
             .addButton((button) => {
-            button.setButtonText("重置").onClick(() => {
+            button.setButtonText(strings.settings.resetButton).onClick(() => {
                 this.plugin.clearSelectionHistory();
             });
         });
@@ -649,7 +685,7 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
         if (!key.startsWith(prefix))
             return null;
         const rule = key.slice(prefix.length);
-        return Object.prototype.hasOwnProperty.call(RULE_DESCRIPTIONS, rule) ? rule : null;
+        return Object.prototype.hasOwnProperty.call(getLocaleStrings().rules, rule) ? rule : null;
     }
 }
 
@@ -665,15 +701,16 @@ class QuickExpandSelectionPlugin extends obsidian.Plugin {
     async onload() {
         await this.loadSettings();
         this.addSettingTab(new QuickExpandSelectionSettingTab(this.app, this));
+        const strings = getLocaleStrings();
         this.addCommand({
             id: "expand-selection",
-            name: "扩选文本",
+            name: strings.commands.expandSelection,
             repeatable: true,
             editorCallback: (editor) => this.expand(editor)
         });
         this.addCommand({
             id: "shrink-selection",
-            name: "缩选文本",
+            name: strings.commands.shrinkSelection,
             repeatable: true,
             editorCallback: (editor) => this.shrink(editor)
         });
@@ -699,7 +736,7 @@ class QuickExpandSelectionPlugin extends obsidian.Plugin {
         const editor = this.getActiveEditor();
         if (editor)
             this.historyByEditor.delete(editor);
-        new obsidian.Notice("已重置扩选历史");
+        new obsidian.Notice(getLocaleStrings().notices.expansionHistoryReset);
     }
     getActiveEditor() {
         const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
