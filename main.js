@@ -584,14 +584,14 @@ const zhCn = {
         expansionHistoryReset: "已重置扩选历史"
     }
 };
-function getLocale() {
-    const language = typeof obsidian.getLanguage === "function"
-        ? obsidian.getLanguage().toLowerCase().replace(/_/g, "-")
-        : "en";
-    return language === "zh" || language.startsWith("zh-") ? zhCn : en;
+function getLocaleStringsForLanguage(rawLanguage) {
+    const language = rawLanguage.toLowerCase().replace(/_/g, "-");
+    return language === "zh" ? zhCn : en;
 }
+
 function getLocaleStrings() {
-    return getLocale();
+    const language = typeof obsidian.getLanguage === "function" ? obsidian.getLanguage() : "en";
+    return getLocaleStringsForLanguage(language);
 }
 
 class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
