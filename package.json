@@ -1,6 +1,6 @@
 {
   "name": "quick-expand-selection",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Configurable Markdown-aware expand and shrink selection commands for Obsidian.",
   "main": "main.js",
   "scripts": {
