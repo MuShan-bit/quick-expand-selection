@@ -1,11 +1,11 @@
 # Quick Expand Selection
 
-Quick Expand Selection adds two Obsidian editor commands:
+Quick Expand Selection adds two localized Obsidian editor commands:
 
-- `扩选文本`
-- `缩选文本`
+- `Expand selection`
+- `Shrink selection`
 
-The commands have no default hotkeys so they do not conflict with existing Obsidian or user-defined shortcuts. Assign them in **Settings -> Hotkeys**. The default expansion model is Markdown-aware and progresses through word/token boundaries, punctuation and whitespace, lines and paragraphs, Markdown structures, and the full document. Code fences, LaTeX, list nesting, and heading sections are handled as separate structural scopes.
+The command names and settings follow Obsidian's interface language. English is used as the fallback, with Simplified Chinese currently supported. The commands have no default hotkeys so they do not conflict with existing Obsidian or user-defined shortcuts. Assign them in **Settings -> Hotkeys**. The default expansion model is Markdown-aware and progresses through word/token boundaries, punctuation and whitespace, lines and paragraphs, Markdown structures, and the full document. Code fences, LaTeX, list nesting, and heading sections are handled as separate structural scopes.
 
 Every expansion rule can be enabled or disabled in the plugin settings. Shrinking follows the expansion history for the current editor and falls back to a collapsed cursor when no history remains.
 
