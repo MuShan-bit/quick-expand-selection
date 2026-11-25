@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
 import type QuickExpandSelectionPlugin from "./main";
-import type { SelectionRules } from "./selection";
+import { getDefaultSelectionRules, type SelectionRules } from "./selection";
 import { getLocaleStrings } from "./i18n";
 
 export class QuickExpandSelectionSettingTab extends PluginSettingTab {
@@ -10,6 +10,7 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
 
   override getSettingDefinitions(): SettingDefinitionItem[] {
     const strings = getLocaleStrings();
+    const defaults = getDefaultSelectionRules();
     return [
       {
         type: "group",
@@ -28,7 +29,7 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
               control: {
                 type: "toggle" as const,
                 key: `rules.${key}`,
-                defaultValue: false
+                defaultValue: defaults[key]
               }
             };
           }),
@@ -65,10 +66,6 @@ export class QuickExpandSelectionSettingTab extends PluginSettingTab {
       text: strings.settings.description,
       cls: "setting-item-description"
     });
-
-    new Setting(containerEl)
-      .setName(strings.settings.heading)
-      .setHeading();
 
     (Object.keys(strings.rules) as Array<keyof SelectionRules>).forEach((key) => {
       const description = strings.rules[key];

@@ -601,6 +601,7 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
     }
     getSettingDefinitions() {
         const strings = getLocaleStrings();
+        const defaults = getDefaultSelectionRules();
         return [
             {
                 type: "group",
@@ -619,7 +620,7 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
                             control: {
                                 type: "toggle",
                                 key: `rules.${key}`,
-                                defaultValue: false
+                                defaultValue: defaults[key]
                             }
                         };
                     }),
@@ -654,9 +655,6 @@ class QuickExpandSelectionSettingTab extends obsidian.PluginSettingTab {
             text: strings.settings.description,
             cls: "setting-item-description"
         });
-        new obsidian.Setting(containerEl)
-            .setName(strings.settings.heading)
-            .setHeading();
         Object.keys(strings.rules).forEach((key) => {
             const description = strings.rules[key];
             new obsidian.Setting(containerEl)
