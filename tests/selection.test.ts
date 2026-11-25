@@ -221,3 +221,68 @@ test("handles apostrophes inside double-quoted strings in code blocks", () => {
   const quoted = expandSelection(text, hello, allRules);
   assert.equal(selected(text, quoted), "'hello'");
 });
+
+test("expands prose under headings through pair, line, paragraph, then section", () => {
+  const text = "# Title\n\n这是正文里的 (target) 单词。\n第二行内容。\n\n另一段。\n\n# Next";
+  const cursorOffset = text.indexOf("target");
+  let current: SelectionState = { anchor: cursorOffset, head: cursorOffset };
+  const steps: string[] = [];
+  for (let index = 0; index < 7; index += 1) {
+    const next = expandSelection(text, current, allRules);
+    if (next.from === current.anchor && next.to === current.head) break;
+    steps.push(selected(text, next));
+    current = { anchor: next.from, head: next.to };
+  }
+  assert.deepEqual(steps, [
+    "target",
+    "(target)",
+    " (target) ",
+    "这是正文里的 (target) 单词。",
+    "这是正文里的 (target) 单词。\n第二行内容。",
+    "# Title\n\n这是正文里的 (target) 单词。\n第二行内容。\n\n另一段。\n",
+    text
+  ]);
+});
+
+test("expands inline pairs inside list items and composes into enclosing heading section", () => {
+  const text = "# Section\n\n- first\n  - item (nested) **bold**\n  - second\n- last\n\n# Next";
+  const nested = at(text, "nested");
+  let current = nested;
+  const steps: string[] = [];
+  for (let index = 0; index < 7; index += 1) {
+    const next = expandSelection(text, current, allRules);
+    if (next.from === current.anchor && next.to === current.head) break;
+    steps.push(selected(text, next));
+    current = { anchor: next.from, head: next.to };
+  }
+  assert.deepEqual(steps, [
+    "(nested)",
+    "item (nested) **bold**",
+    "- item (nested) **bold**",
+    "  - item (nested) **bold**\n  - second",
+    "- first\n  - item (nested) **bold**\n  - second\n- last",
+    "# Section\n\n- first\n  - item (nested) **bold**\n  - second\n- last\n",
+    text
+  ]);
+});
+
+test("segments CJK words on collapsed cursor before expanding to full CJK run", () => {
+  const text = "写作很重要。下一句。";
+  const cursor = { anchor: 1, head: 1 };
+  const word = expandSelection(text, cursor, allRules);
+  assert.equal(selected(text, word), "写作");
+  const run = expandSelection(text, { anchor: word.from, head: word.to }, allRules);
+  assert.equal(selected(text, run), "写作很重要");
+});
+
+test("expands body before including YAML frontmatter", () => {
+  const text = "---\ntitle: Note\n---\n\nhello world";
+  const hello = at(text, "hello");
+  const withSpace = expandSelection(text, hello, allRules);
+  const line = expandSelection(text, { anchor: withSpace.from, head: withSpace.to }, allRules);
+  const body = expandSelection(text, { anchor: line.from, head: line.to }, allRules);
+  const full = expandSelection(text, { anchor: body.from, head: body.to }, allRules);
+  assert.equal(selected(text, line), "hello world");
+  assert.equal(selected(text, body), "\nhello world");
+  assert.equal(selected(text, full), text);
+});

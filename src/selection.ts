@@ -36,11 +36,36 @@ const DEFAULT_RULES: SelectionRules = {
 const PUNCTUATION = /[\p{P}\p{S}]/u;
 const WHITESPACE = /\s/u;
 const WORD = /[\p{L}\p{M}\p{N}_]/u;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const LIST_MARKER = /^(\s*)(?:(?:[-+*]|\d+[.)])\s+)/u;
 const FENCE_OPEN_MARKER = /^\s{0,3}(`{3,}|~{3,})(.*)$/u;
 const FENCE_CLOSE_MARKER = /^\s{0,3}(`{3,}|~{3,})\s*$/u;
+const FRONTMATTER_OPEN = /^---\s*$/u;
+const FRONTMATTER_CLOSE = /^(?:---|\.\.\.)\s*$/u;
 const LATEX_BLOCK_START = /^\s*\\(?:begin\{([^}]+)\}|\[)/u;
 const LATEX_BLOCK_END = /^\s*\\(?:end\{([^}]+)\}|\])/u;
+
+interface WordSegment {
+  segment: string;
+  index: number;
+  isWordLike?: boolean;
+}
+
+interface WordSegmenterLike {
+  segment(input: string): Iterable<WordSegment>;
+}
+
+const wordSegmenter: WordSegmenterLike | null = (() => {
+  const intlWithSegmenter = Intl as unknown as {
+    Segmenter?: new (
+      locales?: string | string[],
+      options?: { granularity?: "grapheme" | "word" | "sentence" }
+    ) => WordSegmenterLike;
+  };
+  return typeof intlWithSegmenter.Segmenter === "function"
+    ? new intlWithSegmenter.Segmenter(undefined, { granularity: "word" })
+    : null;
+})();
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -123,10 +148,32 @@ interface FenceContext {
   endLine: number;
 }
 
+interface FrontmatterContext {
+  range: TextRange;
+  bodyRange: TextRange | null;
+  endLine: number;
+}
+
 interface DocumentContext {
   text: string;
   lines: LineInfo[];
   fences: FenceContext[];
+  frontmatter: FrontmatterContext | null;
+}
+
+function parseFrontmatter(lines: LineInfo[], textLength: number): FrontmatterContext | null {
+  if (lines.length < 2 || !FRONTMATTER_OPEN.test(lines[0].text)) return null;
+  for (let index = 1; index < lines.length; index += 1) {
+    if (FRONTMATTER_CLOSE.test(lines[index].text)) {
+      const range = { from: 0, to: lines[index].end };
+      const bodyRange =
+        index + 1 < lines.length
+          ? { from: lines[index + 1].start, to: textLength }
+          : null;
+      return { range, bodyRange, endLine: index };
+    }
+  }
+  return null;
 }
 
 function parseFenceContexts(lines: LineInfo[], textLength: number): FenceContext[] {
@@ -190,7 +237,12 @@ function parseFenceContexts(lines: LineInfo[], textLength: number): FenceContext
 function createDocumentContext(text: string): DocumentContext {
   const lines = getLines(text);
   const fences = parseFenceContexts(lines, text.length);
-  return { text, lines, fences };
+  const frontmatter = parseFrontmatter(lines, text.length);
+  return { text, lines, fences, frontmatter };
+}
+
+function isLineInsideFrontmatter(frontmatter: FrontmatterContext | null, lineIndex: number): boolean {
+  return frontmatter !== null && lineIndex <= frontmatter.endLine;
 }
 
 function isLineInsideFence(fences: FenceContext[], lineIndex: number): boolean {
@@ -289,6 +341,7 @@ function listBlockForLine(lines: ReturnType<typeof getLines>, index: number, ind
 function headingLevelAt(context: DocumentContext, index: number): number | null {
   if (index < 0 || index >= context.lines.length) return null;
   if (isLineInsideFence(context.fences, index)) return null;
+  if (isLineInsideFrontmatter(context.frontmatter, index)) return null;
   const match = context.lines[index].text.match(/^\s{0,3}(#{1,6})(?:\s+|$)/u);
   return match ? match[1].length : null;
 }
@@ -363,10 +416,39 @@ function expandWord(text: string, offset: number): TextRange | null {
   if (isWord(current)) {
     while (from > 0 && isWord(text[from - 1])) from -= 1;
     while (to < text.length && isWord(text[to])) to += 1;
+
+    const run = text.slice(from, to);
+    if (wordSegmenter && CJK.test(run)) {
+      const relativeOffset = offset - from;
+      for (const segment of wordSegmenter.segment(run)) {
+        const segStart = segment.index;
+        const segEnd = segStart + segment.segment.length;
+        if (relativeOffset >= segStart && relativeOffset < segEnd) {
+          if (segEnd - segStart < run.length) {
+            return { from: from + segStart, to: from + segEnd };
+          }
+          break;
+        }
+      }
+    }
+
     return { from, to };
   }
 
   return { from, to: offset + 1 };
+}
+
+function expandWordRun(text: string, range: TextRange): TextRange | null {
+  const candidate = normalizeRange(range, text.length);
+  if (candidate.from >= candidate.to) return null;
+  for (let index = candidate.from; index < candidate.to; index += 1) {
+    if (!isWord(text[index])) return null;
+  }
+  let from = candidate.from;
+  let to = candidate.to;
+  while (from > 0 && isWord(text[from - 1])) from -= 1;
+  while (to < text.length && isWord(text[to])) to += 1;
+  return from === candidate.from && to === candidate.to ? null : { from, to };
 }
 
 function expandBoundaryRun(text: string, range: TextRange, rules: SelectionRules): TextRange | null {
@@ -405,6 +487,16 @@ function expandToken(text: string, range: TextRange, rules: SelectionRules): Tex
   return { from, to };
 }
 
+function isParagraphBoundaryLine(context: DocumentContext, lineIndex: number): boolean {
+  if (lineIndex < 0 || lineIndex >= context.lines.length) return true;
+  return (
+    isBlankLine(context.lines[lineIndex].text) ||
+    isLineInsideFence(context.fences, lineIndex) ||
+    isLineInsideFrontmatter(context.frontmatter, lineIndex) ||
+    headingLevelAt(context, lineIndex) !== null
+  );
+}
+
 function expandParagraph(context: DocumentContext, range: TextRange): TextRange | null {
   const { text, lines } = context;
   const startLine = lineNumberAt(text, range.from);
@@ -413,8 +505,8 @@ function expandParagraph(context: DocumentContext, range: TextRange): TextRange 
   let first = startLine;
   let last = endLine;
 
-  while (first > 0 && !isBlankLine(lines[first - 1].text)) first -= 1;
-  while (last + 1 < lines.length && !isBlankLine(lines[last + 1].text)) last += 1;
+  while (first > 0 && !isParagraphBoundaryLine(context, first - 1)) first -= 1;
+  while (last + 1 < lines.length && !isParagraphBoundaryLine(context, last + 1)) last += 1;
   return { from: lines[first].start, to: lines[last].end };
 }
 
@@ -434,6 +526,10 @@ function getListExpansionRanges(context: DocumentContext, range: TextRange): Tex
   if (!current || !currentLine) return [];
 
   const ranges: TextRange[] = [];
+  const contentStart = currentLine.start + current.contentStart;
+  if (contentStart < currentLine.end) {
+    ranges.push({ from: contentStart, to: currentLine.end });
+  }
   const itemStart = currentLine.start + current.indent;
   ranges.push({ from: itemStart, to: currentLine.end });
 
@@ -777,10 +873,9 @@ export function expandSelection(
   const latexRanges = rules.latex ? findContainingLatexRanges(context, current) : [];
   const lineIndex = lineNumberAt(text, clamp(current.from, 0, text.length));
   const currentLine = context.lines[lineIndex];
-  const listScope = rules.list && !!getListInfo(currentLine?.text ?? "");
-  const headingScope =
-    rules.heading &&
-    (headingLevelAt(context, lineIndex) !== null || headingHierarchyRanges(context, lineIndex).length > 0);
+  const listInfo = rules.list && !fenceContext ? getListInfo(currentLine?.text ?? "") : null;
+  const isOnHeadingLine = rules.heading && headingLevelAt(context, lineIndex) !== null;
+  const headingRanges = rules.heading ? headingHierarchyRanges(context, lineIndex) : [];
 
   if (current.from === current.to) candidates.push(expandWord(text, cursor));
 
@@ -803,30 +898,58 @@ export function expandSelection(
     const latexScope = latexRanges[latexRanges.length - 1];
     candidates.push(...addSurroundingPairRanges(text, current, false, latexScope));
     candidates.push(...latexRanges);
-    if (rules.line) candidates.push(getCodeLineRange(text, current));
-  } else if (listScope) {
-    candidates.push(...getListExpansionRanges(context, current));
-  } else if (headingScope) {
-    if (headingLevelAt(context, lineIndex) !== null) {
-      candidates.push({ from: currentLine.start, to: currentLine.end });
+    if (listInfo) {
+      candidates.push(...getListExpansionRanges(context, current));
+    } else if (rules.line) {
+      candidates.push(getCodeLineRange(text, current));
+      candidates.push(expandParagraph(context, current));
     }
-    candidates.push(...headingHierarchyRanges(context, lineIndex));
+  } else if (listInfo && currentLine) {
+    if (current.from !== current.to) {
+      const itemContentScope = {
+        from: currentLine.start + listInfo.contentStart,
+        to: currentLine.end
+      };
+      if (rangeContains(itemContentScope, current)) {
+        candidates.push(...addSurroundingPairRanges(text, current, true, itemContentScope));
+        candidates.push(expandWordRun(text, current));
+      }
+    }
+    candidates.push(...getListExpansionRanges(context, current));
+  } else if (isOnHeadingLine && currentLine) {
+    if (current.from !== current.to) {
+      const headingLineScope = { from: currentLine.start, to: currentLine.end };
+      candidates.push(...addSurroundingPairRanges(text, current, true, headingLineScope));
+      candidates.push(expandWordRun(text, current));
+    }
+    candidates.push({ from: currentLine.start, to: currentLine.end });
   } else {
     if (current.from !== current.to) {
       const paragraphScope = expandParagraph(context, current) ?? { from: 0, to: text.length };
       candidates.push(...addSurroundingPairRanges(text, current, true, paragraphScope));
       candidates.push(expandAdjacentBoundaries(text, current, rules));
       candidates.push(expandBoundaryRun(text, current, rules));
+      candidates.push(expandWordRun(text, current));
       candidates.push(expandToken(text, current, rules));
     }
-  }
-
-  if (!fenceContext && latexRanges.length === 0 && !listScope && !headingScope) {
     if (rules.line) {
       candidates.push(getCodeLineRange(text, current));
       candidates.push(expandParagraph(context, current));
     }
   }
+
+  if (headingRanges.length > 0) {
+    candidates.push(...headingRanges);
+  }
+
+  if (context.frontmatter) {
+    if (rangeContains(context.frontmatter.range, current)) {
+      candidates.push(context.frontmatter.range);
+    } else if (context.frontmatter.bodyRange && rangeContains(context.frontmatter.bodyRange, current)) {
+      candidates.push(context.frontmatter.bodyRange);
+    }
+  }
+
   candidates.push(expandDocument(text));
 
   const seen = new Set<string>();
