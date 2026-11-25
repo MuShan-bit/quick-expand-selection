@@ -1,14 +1,17 @@
-import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
+import { Editor, Notice, Plugin } from "obsidian";
 import {
-  expandSelection,
   getDefaultSelectionRules,
-  getSelectionRange,
   offsetToPosition,
   positionToOffset,
-  shrinkSelection,
   type SelectionRules,
   type SelectionState
 } from "./selection";
+import {
+  expandWithHistory,
+  shrinkWithHistory,
+  type EditorHistory,
+  type EditorSelectionAdapter
+} from "./history";
 import { QuickExpandSelectionSettingTab } from "./settings";
 import { getLocaleStrings } from "./i18n";
 
@@ -20,14 +23,11 @@ const DEFAULT_SETTINGS: QuickExpandSelectionSettings = {
   rules: getDefaultSelectionRules()
 };
 
-interface EditorHistory {
-  text: string;
-  selections: SelectionState[];
-}
-
 export default class QuickExpandSelectionPlugin extends Plugin {
-  override settings: QuickExpandSelectionSettings = DEFAULT_SETTINGS;
-  private readonly historyByEditor = new WeakMap<Editor, EditorHistory>();
+  override settings: QuickExpandSelectionSettings = {
+    rules: getDefaultSelectionRules()
+  };
+  private historyByEditor = new WeakMap<Editor, EditorHistory>();
 
   override async onload(): Promise<void> {
     await this.loadSettings();
@@ -52,13 +52,17 @@ export default class QuickExpandSelectionPlugin extends Plugin {
     // WeakMap history is released with its editor instances.
   }
 
+  override async onExternalSettingsChange(): Promise<void> {
+    await this.loadSettings();
+  }
+
   async loadSettings(): Promise<void> {
     const saved = (await this.loadData()) as Partial<QuickExpandSelectionSettings> | null;
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...saved,
       rules: {
-        ...DEFAULT_SETTINGS.rules,
+        ...getDefaultSelectionRules(),
         ...(saved?.rules ?? {})
       }
     };
@@ -69,64 +73,73 @@ export default class QuickExpandSelectionPlugin extends Plugin {
   }
 
   clearSelectionHistory(): void {
-    const editor = this.getActiveEditor();
-    if (editor) this.historyByEditor.delete(editor);
+    this.historyByEditor = new WeakMap<Editor, EditorHistory>();
     new Notice(getLocaleStrings().notices.expansionHistoryReset);
   }
 
-  private getActiveEditor(): Editor | null {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    return view?.editor ?? null;
-  }
+  private createAdapter(editor: Editor): EditorSelectionAdapter {
+    const posToOffset = (text: string, pos: { line: number; ch: number }): number =>
+      typeof editor.posToOffset === "function"
+        ? editor.posToOffset(pos)
+        : positionToOffset(text, pos);
 
-  private getText(editor: Editor): string {
-    return editor.getValue();
-  }
+    const offsetToPos = (text: string, offset: number): { line: number; ch: number } =>
+      typeof editor.offsetToPos === "function"
+        ? editor.offsetToPos(offset)
+        : offsetToPosition(text, offset);
 
-  private getSelectionState(editor: Editor, text: string): SelectionState {
     return {
-      anchor: positionToOffset(text, editor.getCursor("anchor")),
-      head: positionToOffset(text, editor.getCursor("head"))
+      getText: () => editor.getValue(),
+      getSelections: () => {
+        const text = editor.getValue();
+        const raw = typeof editor.listSelections === "function" ? editor.listSelections() : [];
+        if (raw.length > 0) {
+          return raw.map((selection) => ({
+            anchor: posToOffset(text, selection.anchor),
+            head: posToOffset(text, selection.head)
+          }));
+        }
+        return [
+          {
+            anchor: posToOffset(text, editor.getCursor("anchor")),
+            head: posToOffset(text, editor.getCursor("head"))
+          }
+        ];
+      },
+      setSelections: (selections: SelectionState[]) => {
+        if (selections.length === 0) return;
+        const text = editor.getValue();
+        if (selections.length === 1 || typeof editor.setSelections !== "function") {
+          const primary = selections[0];
+          editor.setSelection(
+            offsetToPos(text, primary.anchor),
+            offsetToPos(text, primary.head)
+          );
+          return;
+        }
+        editor.setSelections(
+          selections.map((selection) => ({
+            anchor: offsetToPos(text, selection.anchor),
+            head: offsetToPos(text, selection.head)
+          }))
+        );
+      }
     };
   }
 
-  private setSelection(editor: Editor, text: string, selection: SelectionState): void {
-    editor.setSelection(offsetToPosition(text, selection.anchor), offsetToPosition(text, selection.head));
-  }
-
-  private ensureHistory(editor: Editor, text: string, current: SelectionState): EditorHistory {
-    const existing = this.historyByEditor.get(editor);
-    const range = getSelectionRange(current);
-    const existingCurrent = existing?.selections.at(-1);
-    if (!existing || existing.text !== text || !existingCurrent || getSelectionRange(existingCurrent).from !== range.from || getSelectionRange(existingCurrent).to !== range.to) {
-      const history: EditorHistory = { text, selections: [current] };
-      this.historyByEditor.set(editor, history);
-      return history;
-    }
-    return existing;
-  }
-
   private expand(editor: Editor): void {
-    const text = this.getText(editor);
-    const current = this.getSelectionState(editor, text);
-    const history = this.ensureHistory(editor, text, current);
-    const nextRange = expandSelection(text, current, this.settings.rules);
-    const next: SelectionState = current.anchor <= current.head
-      ? { anchor: nextRange.from, head: nextRange.to }
-      : { anchor: nextRange.to, head: nextRange.from };
-    const previous = history.selections.at(-1);
-    if (!previous || previous.anchor !== next.anchor || previous.head !== next.head) {
-      history.selections.push(next);
-    }
-    this.setSelection(editor, text, next);
+    const adapter = this.createAdapter(editor);
+    const updated = expandWithHistory(
+      this.historyByEditor.get(editor),
+      adapter,
+      this.settings.rules
+    );
+    this.historyByEditor.set(editor, updated);
   }
 
   private shrink(editor: Editor): void {
-    const text = this.getText(editor);
-    const current = this.getSelectionState(editor, text);
-    const history = this.ensureHistory(editor, text, current);
-    const next = shrinkSelection(history.selections.slice(0, -1), current);
-    if (history.selections.length > 1) history.selections.pop();
-    this.setSelection(editor, text, next);
+    const adapter = this.createAdapter(editor);
+    const updated = shrinkWithHistory(this.historyByEditor.get(editor), adapter);
+    this.historyByEditor.set(editor, updated);
   }
 }

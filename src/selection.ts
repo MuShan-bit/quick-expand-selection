@@ -995,3 +995,8 @@ export function offsetToPosition(text: string, offset: number): TextPosition {
 export function getDefaultSelectionRules(): SelectionRules {
   return { ...DEFAULT_RULES };
 }
+
+export function getDocumentBodyRange(text: string): TextRange | null {
+  const lines = getLines(text);
+  return parseFrontmatter(lines, text.length)?.bodyRange ?? null;
+}

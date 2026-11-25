@@ -843,17 +843,6 @@ function expandSelection(text, selection, inputRules = DEFAULT_RULES) {
     }
     return current;
 }
-function shrinkSelection(history, current) {
-    const currentRange = getSelectionRange(current);
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-        const candidate = history[index];
-        const candidateRange = getSelectionRange(candidate);
-        if (candidateRange.from !== currentRange.from || candidateRange.to !== currentRange.to) {
-            return candidate;
-        }
-    }
-    return { anchor: current.head, head: current.head };
-}
 function positionToOffset(text, position) {
     const lines = getLines(text);
     const line = clamp(position.line, 0, Math.max(0, lines.length - 1));
@@ -868,6 +857,117 @@ function offsetToPosition(text, offset) {
 }
 function getDefaultSelectionRules() {
     return { ...DEFAULT_RULES };
+}
+function getDocumentBodyRange(text) {
+    const lines = getLines(text);
+    return parseFrontmatter(lines, text.length)?.bodyRange ?? null;
+}
+
+function snapshotsEqual(left, right) {
+    if (left.length !== right.length)
+        return false;
+    for (let index = 0; index < left.length; index += 1) {
+        const leftRange = getSelectionRange(left[index]);
+        const rightRange = getSelectionRange(right[index]);
+        if (leftRange.from !== rightRange.from || leftRange.to !== rightRange.to) {
+            return false;
+        }
+    }
+    return true;
+}
+function isClampedFullDocumentMatch(text, expected, actual) {
+    if (expected.length !== 1 || actual.length !== 1)
+        return false;
+    const expectedRange = getSelectionRange(expected[0]);
+    const actualRange = getSelectionRange(actual[0]);
+    const bodyRange = getDocumentBodyRange(text);
+    const expectedIsFullDoc = expectedRange.from === 0 && expectedRange.to === text.length;
+    const expectedIsFullBody = bodyRange !== null &&
+        expectedRange.from === bodyRange.from &&
+        expectedRange.to === bodyRange.to;
+    if (!expectedIsFullDoc && !expectedIsFullBody)
+        return false;
+    const actualReachesEnd = actualRange.to >= Math.max(0, text.length - 1);
+    const actualStartsAtDocOrBody = actualRange.from === 0 || (bodyRange !== null && actualRange.from === bodyRange.from);
+    return actualReachesEnd && actualStartsAtDocOrBody && actualRange.from < actualRange.to;
+}
+function collapseSelections(selections) {
+    return selections.map((selection) => ({
+        anchor: selection.head,
+        head: selection.head
+    }));
+}
+function ensureEditorHistory(existing, text, current) {
+    const existingTop = existing?.snapshots.at(-1);
+    if (!existing ||
+        existing.text !== text ||
+        !existingTop ||
+        (!snapshotsEqual(existingTop, current) &&
+            !isClampedFullDocumentMatch(text, existingTop, current))) {
+        return { text, snapshots: [current] };
+    }
+    return existing;
+}
+function expandWithHistory(existing, adapter, rules) {
+    const text = adapter.getText();
+    const current = adapter.getSelections();
+    if (current.length === 0) {
+        return existing ?? { text, snapshots: [] };
+    }
+    const history = ensureEditorHistory(existing, text, current);
+    const next = current.map((selection) => {
+        const nextRange = expandSelection(text, selection, rules);
+        return selection.anchor <= selection.head
+            ? { anchor: nextRange.from, head: nextRange.to }
+            : { anchor: nextRange.to, head: nextRange.from };
+    });
+    adapter.setSelections(next);
+    // Read back the actual selection applied by the editor (handles Live Preview / Properties
+    // clamping and automatic merging of overlapping multi-cursor selections).
+    const applied = adapter.getSelections();
+    const recorded = applied.length > 0 ? applied : next;
+    const previous = history.snapshots.at(-1);
+    if (!previous || !snapshotsEqual(previous, recorded)) {
+        history.snapshots.push(recorded);
+    }
+    return history;
+}
+function shrinkWithHistory(existing, adapter) {
+    const text = adapter.getText();
+    const current = adapter.getSelections();
+    if (current.length === 0) {
+        return existing ?? { text, snapshots: [] };
+    }
+    const history = ensureEditorHistory(existing, text, current);
+    if (history.snapshots.length <= 1) {
+        const collapsed = collapseSelections(current);
+        adapter.setSelections(collapsed);
+        const applied = adapter.getSelections();
+        return { text, snapshots: [applied.length > 0 ? applied : collapsed] };
+    }
+    // Pop current snapshot and find the most recent distinct prior snapshot
+    history.snapshots.pop();
+    let target = null;
+    while (history.snapshots.length > 0) {
+        const candidate = history.snapshots[history.snapshots.length - 1];
+        if (!snapshotsEqual(candidate, current)) {
+            target = candidate;
+            break;
+        }
+        history.snapshots.pop();
+    }
+    if (!target) {
+        const collapsed = collapseSelections(current);
+        adapter.setSelections(collapsed);
+        const applied = adapter.getSelections();
+        return { text, snapshots: [applied.length > 0 ? applied : collapsed] };
+    }
+    adapter.setSelections(target);
+    const applied = adapter.getSelections();
+    if (applied.length > 0 && history.snapshots.length > 0) {
+        history.snapshots[history.snapshots.length - 1] = applied;
+    }
+    return history;
 }
 
 const en = {
@@ -1033,7 +1133,9 @@ const DEFAULT_SETTINGS = {
 class QuickExpandSelectionPlugin extends obsidian.Plugin {
     constructor() {
         super(...arguments);
-        this.settings = DEFAULT_SETTINGS;
+        this.settings = {
+            rules: getDefaultSelectionRules()
+        };
         this.historyByEditor = new WeakMap();
     }
     async onload() {
@@ -1056,13 +1158,16 @@ class QuickExpandSelectionPlugin extends obsidian.Plugin {
     onunload() {
         // WeakMap history is released with its editor instances.
     }
+    async onExternalSettingsChange() {
+        await this.loadSettings();
+    }
     async loadSettings() {
         const saved = (await this.loadData());
         this.settings = {
             ...DEFAULT_SETTINGS,
             ...saved,
             rules: {
-                ...DEFAULT_SETTINGS.rules,
+                ...getDefaultSelectionRules(),
                 ...(saved?.rules ?? {})
             }
         };
@@ -1071,60 +1176,59 @@ class QuickExpandSelectionPlugin extends obsidian.Plugin {
         await this.saveData(this.settings);
     }
     clearSelectionHistory() {
-        const editor = this.getActiveEditor();
-        if (editor)
-            this.historyByEditor.delete(editor);
+        this.historyByEditor = new WeakMap();
         new obsidian.Notice(getLocaleStrings().notices.expansionHistoryReset);
     }
-    getActiveEditor() {
-        const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-        return view?.editor ?? null;
-    }
-    getText(editor) {
-        return editor.getValue();
-    }
-    getSelectionState(editor, text) {
+    createAdapter(editor) {
+        const posToOffset = (text, pos) => typeof editor.posToOffset === "function"
+            ? editor.posToOffset(pos)
+            : positionToOffset(text, pos);
+        const offsetToPos = (text, offset) => typeof editor.offsetToPos === "function"
+            ? editor.offsetToPos(offset)
+            : offsetToPosition(text, offset);
         return {
-            anchor: positionToOffset(text, editor.getCursor("anchor")),
-            head: positionToOffset(text, editor.getCursor("head"))
+            getText: () => editor.getValue(),
+            getSelections: () => {
+                const text = editor.getValue();
+                const raw = typeof editor.listSelections === "function" ? editor.listSelections() : [];
+                if (raw.length > 0) {
+                    return raw.map((selection) => ({
+                        anchor: posToOffset(text, selection.anchor),
+                        head: posToOffset(text, selection.head)
+                    }));
+                }
+                return [
+                    {
+                        anchor: posToOffset(text, editor.getCursor("anchor")),
+                        head: posToOffset(text, editor.getCursor("head"))
+                    }
+                ];
+            },
+            setSelections: (selections) => {
+                if (selections.length === 0)
+                    return;
+                const text = editor.getValue();
+                if (selections.length === 1 || typeof editor.setSelections !== "function") {
+                    const primary = selections[0];
+                    editor.setSelection(offsetToPos(text, primary.anchor), offsetToPos(text, primary.head));
+                    return;
+                }
+                editor.setSelections(selections.map((selection) => ({
+                    anchor: offsetToPos(text, selection.anchor),
+                    head: offsetToPos(text, selection.head)
+                })));
+            }
         };
     }
-    setSelection(editor, text, selection) {
-        editor.setSelection(offsetToPosition(text, selection.anchor), offsetToPosition(text, selection.head));
-    }
-    ensureHistory(editor, text, current) {
-        const existing = this.historyByEditor.get(editor);
-        const range = getSelectionRange(current);
-        const existingCurrent = existing?.selections.at(-1);
-        if (!existing || existing.text !== text || !existingCurrent || getSelectionRange(existingCurrent).from !== range.from || getSelectionRange(existingCurrent).to !== range.to) {
-            const history = { text, selections: [current] };
-            this.historyByEditor.set(editor, history);
-            return history;
-        }
-        return existing;
-    }
     expand(editor) {
-        const text = this.getText(editor);
-        const current = this.getSelectionState(editor, text);
-        const history = this.ensureHistory(editor, text, current);
-        const nextRange = expandSelection(text, current, this.settings.rules);
-        const next = current.anchor <= current.head
-            ? { anchor: nextRange.from, head: nextRange.to }
-            : { anchor: nextRange.to, head: nextRange.from };
-        const previous = history.selections.at(-1);
-        if (!previous || previous.anchor !== next.anchor || previous.head !== next.head) {
-            history.selections.push(next);
-        }
-        this.setSelection(editor, text, next);
+        const adapter = this.createAdapter(editor);
+        const updated = expandWithHistory(this.historyByEditor.get(editor), adapter, this.settings.rules);
+        this.historyByEditor.set(editor, updated);
     }
     shrink(editor) {
-        const text = this.getText(editor);
-        const current = this.getSelectionState(editor, text);
-        const history = this.ensureHistory(editor, text, current);
-        const next = shrinkSelection(history.selections.slice(0, -1), current);
-        if (history.selections.length > 1)
-            history.selections.pop();
-        this.setSelection(editor, text, next);
+        const adapter = this.createAdapter(editor);
+        const updated = shrinkWithHistory(this.historyByEditor.get(editor), adapter);
+        this.historyByEditor.set(editor, updated);
     }
 }
 
