@@ -37,10 +37,10 @@ const PUNCTUATION = /[\p{P}\p{S}]/u;
 const WHITESPACE = /\s/u;
 const WORD = /[\p{L}\p{M}\p{N}_]/u;
 const LIST_MARKER = /^(\s*)(?:(?:[-+*]|\d+[.)])\s+)/u;
-const FENCE_MARKER = /^\s{0,3}(`{3,}|~{3,})/u;
+const FENCE_OPEN_MARKER = /^\s{0,3}(`{3,}|~{3,})(.*)$/u;
+const FENCE_CLOSE_MARKER = /^\s{0,3}(`{3,}|~{3,})\s*$/u;
 const LATEX_BLOCK_START = /^\s*\\(?:begin\{([^}]+)\}|\[)/u;
 const LATEX_BLOCK_END = /^\s*\\(?:end\{([^}]+)\}|\])/u;
-const LATEX_INLINE_DELIMITERS = ["$$", "\\(", "\\[", "$", "\\begin{"];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -69,7 +69,8 @@ function isAllowedBoundaryCharacter(character: string, rules: SelectionRules): b
 }
 
 function lineStart(text: string, offset: number): number {
-  const start = text.lastIndexOf("\n", Math.max(0, offset - 1));
+  if (offset <= 0) return 0;
+  const start = text.lastIndexOf("\n", offset - 1);
   return start === -1 ? 0 : start + 1;
 }
 
@@ -86,8 +87,14 @@ function lineNumberAt(text: string, offset: number): number {
   return line;
 }
 
-function getLines(text: string): Array<{ start: number; end: number; text: string }> {
-  const lines: Array<{ start: number; end: number; text: string }> = [];
+interface LineInfo {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function getLines(text: string): LineInfo[] {
+  const lines: LineInfo[] = [];
   let start = 0;
 
   while (start <= text.length) {
@@ -111,50 +118,97 @@ function trimOuterWhitespace(text: string, range: TextRange): TextRange {
 
 interface FenceContext {
   range: TextRange;
+  contentRange: TextRange | null;
+  startLine: number;
+  endLine: number;
 }
 
-function parseFenceContexts(text: string): FenceContext[] {
+interface DocumentContext {
+  text: string;
+  lines: LineInfo[];
+  fences: FenceContext[];
+}
+
+function parseFenceContexts(lines: LineInfo[], textLength: number): FenceContext[] {
   const contexts: FenceContext[] = [];
   let openStart: number | null = null;
+  let openLine = -1;
   let fenceCharacter = "";
   let fenceLength = 0;
 
-  for (const line of getLines(text)) {
-    const match = line.text.match(FENCE_MARKER);
-    if (!match) continue;
-
-    const marker = match[1];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (openStart === null) {
+      const openMatch = line.text.match(FENCE_OPEN_MARKER);
+      if (!openMatch) continue;
+      const marker = openMatch[1];
+      const infoString = openMatch[2] ?? "";
+      if (marker[0] === "`" && infoString.includes("`")) continue;
       openStart = line.start;
+      openLine = index;
       fenceCharacter = marker[0];
       fenceLength = marker.length;
       continue;
     }
 
+    const closeMatch = line.text.match(FENCE_CLOSE_MARKER);
+    if (!closeMatch) continue;
+    const marker = closeMatch[1];
     if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
+      const contentRange =
+        openLine + 1 <= index - 1
+          ? { from: lines[openLine + 1].start, to: lines[index - 1].end }
+          : null;
       contexts.push({
-        range: { from: openStart, to: line.end }
+        range: { from: openStart, to: line.end },
+        contentRange,
+        startLine: openLine,
+        endLine: index
       });
       openStart = null;
+      openLine = -1;
       fenceCharacter = "";
       fenceLength = 0;
     }
   }
 
   if (openStart !== null) {
+    const contentRange =
+      openLine + 1 < lines.length
+        ? { from: lines[openLine + 1].start, to: textLength }
+        : null;
     contexts.push({
-      range: { from: openStart, to: text.length }
+      range: { from: openStart, to: textLength },
+      contentRange,
+      startLine: openLine,
+      endLine: Math.max(openLine, lines.length - 1)
     });
   }
   return contexts;
 }
 
-function parseLatexRanges(text: string): TextRange[] {
-  const ranges: TextRange[] = [];
+function createDocumentContext(text: string): DocumentContext {
   const lines = getLines(text);
+  const fences = parseFenceContexts(lines, text.length);
+  return { text, lines, fences };
+}
+
+function isLineInsideFence(fences: FenceContext[], lineIndex: number): boolean {
+  return fences.some((fence) => lineIndex >= fence.startLine && lineIndex <= fence.endLine);
+}
+
+function rangeOverlapsFence(fences: FenceContext[], range: TextRange): boolean {
+  return fences.some((fence) => range.from < fence.range.to && range.to > fence.range.from);
+}
+
+function parseLatexRanges(context: DocumentContext): TextRange[] {
+  const { text, lines, fences } = context;
+  const ranges: TextRange[] = [];
   const stack: Array<{ start: number; environment: string | null }> = [];
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isLineInsideFence(fences, index)) continue;
+    const line = lines[index];
     const startMatch = line.text.match(LATEX_BLOCK_START);
     if (startMatch) {
       stack.push({ start: line.start, environment: startMatch[1] ?? null });
@@ -175,21 +229,26 @@ function parseLatexRanges(text: string): TextRange[] {
     if (opening) ranges.push({ from: opening.start, to: text.length });
   }
 
-  const inlinePattern = /\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?<!\$)\$(?!\$)[^\n$]+(?<!\$)\$(?!\$)/gu;
+  const inlinePattern =
+    /\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?<![\\$])\$(?!\$|\s)(?:[^$\n\\]|\\.)*?(?<!\s|\\)\$(?!\$|\d)/gu;
   for (const match of text.matchAll(inlinePattern)) {
     const from = match.index ?? 0;
-    ranges.push({ from, to: from + match[0].length });
+    const candidate = { from, to: from + match[0].length };
+    if (rangeOverlapsFence(fences, candidate)) continue;
+    ranges.push(candidate);
   }
 
-  return ranges.sort((left, right) => left.from - right.from || left.to - right.to);
+  return ranges.sort(
+    (left, right) => left.to - left.from - (right.to - right.from) || right.from - left.from
+  );
 }
 
-function findContainingLatexRange(text: string, range: TextRange): TextRange | null {
-  return parseLatexRanges(text).find((candidate) => rangeContains(candidate, range)) ?? null;
+function findContainingLatexRanges(context: DocumentContext, range: TextRange): TextRange[] {
+  return parseLatexRanges(context).filter((candidate) => rangeContains(candidate, range));
 }
 
-function findContainingFenceContext(text: string, range: TextRange): FenceContext | null {
-  return parseFenceContexts(text).find((context) => rangeContains(context.range, range)) ?? null;
+function findContainingFenceContext(context: DocumentContext, range: TextRange): FenceContext | null {
+  return context.fences.find((fence) => rangeContains(fence.range, range)) ?? null;
 }
 
 function getListInfo(lineText: string): { indent: number; markerStart: number; contentStart: number } | null {
@@ -227,32 +286,34 @@ function listBlockForLine(lines: ReturnType<typeof getLines>, index: number, ind
   return { from: lines[first].start, to: lines[last].end };
 }
 
-function headingLevel(lineText: string): number | null {
-  const match = lineText.match(/^\s{0,3}(#{1,6})(?:\s+|$)/u);
+function headingLevelAt(context: DocumentContext, index: number): number | null {
+  if (index < 0 || index >= context.lines.length) return null;
+  if (isLineInsideFence(context.fences, index)) return null;
+  const match = context.lines[index].text.match(/^\s{0,3}(#{1,6})(?:\s+|$)/u);
   return match ? match[1].length : null;
 }
 
-function headingSectionForLine(lines: ReturnType<typeof getLines>, index: number): TextRange | null {
-  const level = headingLevel(lines[index]?.text ?? "");
+function headingSectionForLine(context: DocumentContext, index: number): TextRange | null {
+  const level = headingLevelAt(context, index);
   if (level === null) return null;
 
   let nextHeading = index + 1;
-  while (nextHeading < lines.length) {
-    const nextLevel = headingLevel(lines[nextHeading].text);
+  while (nextHeading < context.lines.length) {
+    const nextLevel = headingLevelAt(context, nextHeading);
     if (nextLevel !== null && nextLevel <= level) break;
     nextHeading += 1;
   }
-  const last = nextHeading < lines.length ? nextHeading - 1 : lines.length - 1;
-  return { from: lines[index].start, to: lines[last].end };
+  const last = nextHeading < context.lines.length ? nextHeading - 1 : context.lines.length - 1;
+  return { from: context.lines[index].start, to: context.lines[last].end };
 }
 
-function headingHierarchyRanges(lines: ReturnType<typeof getLines>, index: number): TextRange[] {
+function headingHierarchyRanges(context: DocumentContext, index: number): TextRange[] {
   let headingIndex = index;
-  let level = headingLevel(lines[headingIndex]?.text ?? "");
+  let level = headingLevelAt(context, headingIndex);
 
   if (level === null) {
     for (let lineIndex = index - 1; lineIndex >= 0; lineIndex -= 1) {
-      const candidateLevel = headingLevel(lines[lineIndex].text);
+      const candidateLevel = headingLevelAt(context, lineIndex);
       if (candidateLevel !== null) {
         headingIndex = lineIndex;
         level = candidateLevel;
@@ -263,7 +324,7 @@ function headingHierarchyRanges(lines: ReturnType<typeof getLines>, index: numbe
 
   if (level === null) return [];
   const ranges: TextRange[] = [];
-  const currentSection = headingSectionForLine(lines, headingIndex);
+  const currentSection = headingSectionForLine(context, headingIndex);
   if (currentSection) ranges.push(currentSection);
 
   let childIndex = headingIndex;
@@ -272,7 +333,7 @@ function headingHierarchyRanges(lines: ReturnType<typeof getLines>, index: numbe
     let parentIndex = childIndex - 1;
     let parentLevel: number | null = null;
     while (parentIndex >= 0) {
-      const candidateLevel = headingLevel(lines[parentIndex].text);
+      const candidateLevel = headingLevelAt(context, parentIndex);
       if (candidateLevel !== null && candidateLevel < childLevel) {
         parentLevel = candidateLevel;
         break;
@@ -280,7 +341,7 @@ function headingHierarchyRanges(lines: ReturnType<typeof getLines>, index: numbe
       parentIndex -= 1;
     }
     if (parentIndex < 0 || parentLevel === null) break;
-    const parentSection = headingSectionForLine(lines, parentIndex);
+    const parentSection = headingSectionForLine(context, parentIndex);
     if (parentSection) ranges.push(parentSection);
     childIndex = parentIndex;
     childLevel = parentLevel;
@@ -344,11 +405,11 @@ function expandToken(text: string, range: TextRange, rules: SelectionRules): Tex
   return { from, to };
 }
 
-function expandParagraph(text: string, range: TextRange): TextRange | null {
+function expandParagraph(context: DocumentContext, range: TextRange): TextRange | null {
+  const { text, lines } = context;
   const startLine = lineNumberAt(text, range.from);
-  const endOffset = Math.max(range.from, range.to - 1);
+  const endOffset = range.to > range.from ? range.to - 1 : range.from;
   const endLine = lineNumberAt(text, endOffset);
-  const lines = getLines(text);
   let first = startLine;
   let last = endLine;
 
@@ -365,8 +426,8 @@ function rangeContains(outer: TextRange, inner: TextRange): boolean {
   return outer.from <= inner.from && outer.to >= inner.to;
 }
 
-function getListExpansionRanges(text: string, range: TextRange): TextRange[] {
-  const lines = getLines(text);
+function getListExpansionRanges(context: DocumentContext, range: TextRange): TextRange[] {
+  const { text, lines } = context;
   const lineIndex = lineNumberAt(text, clamp(range.from, 0, text.length));
   const currentLine = lines[lineIndex];
   const current = getListInfo(currentLine?.text ?? "");
@@ -403,7 +464,8 @@ function getListExpansionRanges(text: string, range: TextRange): TextRange[] {
 
 function getCodeLineRange(text: string, range: TextRange): TextRange | null {
   const start = lineStart(text, range.from);
-  const end = lineEnd(text, Math.max(range.from, range.to));
+  const endCursor = range.to > range.from && text[range.to - 1] === "\n" ? range.to - 1 : range.to;
+  const end = lineEnd(text, Math.max(range.from, endCursor));
   return { from: start, to: end };
 }
 
@@ -491,33 +553,36 @@ export function expandSelection(
 ): TextRange {
   const rules = { ...DEFAULT_RULES, ...inputRules };
   const current = normalizeRange(getSelectionRange(selection), text.length);
+  const context = createDocumentContext(text);
   const candidates: Array<TextRange | null> = [];
   const cursor = current.from;
-  const fenceContext = rules.code ? findContainingFenceContext(text, current) : null;
-  const latexRange = rules.latex ? findContainingLatexRange(text, current) : null;
-  const lines = getLines(text);
+  const fenceContext = rules.code ? findContainingFenceContext(context, current) : null;
+  const latexRanges = rules.latex ? findContainingLatexRanges(context, current) : [];
   const lineIndex = lineNumberAt(text, clamp(current.from, 0, text.length));
-  const currentLine = lines[lineIndex];
+  const currentLine = context.lines[lineIndex];
   const listScope = rules.list && !!getListInfo(currentLine?.text ?? "");
-  const headingScope = rules.heading && (headingLevel(currentLine?.text ?? "") !== null || headingHierarchyRanges(lines, lineIndex).length > 0);
+  const headingScope =
+    rules.heading &&
+    (headingLevelAt(context, lineIndex) !== null || headingHierarchyRanges(context, lineIndex).length > 0);
 
   if (current.from === current.to) candidates.push(expandWord(text, cursor));
 
   if (fenceContext) {
     candidates.push(...addCodePairRanges(text, current));
     candidates.push(getCodeLineRange(text, current));
+    if (fenceContext.contentRange) candidates.push(fenceContext.contentRange);
     candidates.push(fenceContext.range);
-  } else if (latexRange) {
+  } else if (latexRanges.length > 0) {
     candidates.push(...addSurroundingPairRanges(text, current, false));
-    candidates.push(latexRange);
+    candidates.push(...latexRanges);
     if (rules.line) candidates.push(getCodeLineRange(text, current));
   } else if (listScope) {
-    candidates.push(...getListExpansionRanges(text, current));
+    candidates.push(...getListExpansionRanges(context, current));
   } else if (headingScope) {
-    if (headingLevel(currentLine?.text ?? "") !== null) {
+    if (headingLevelAt(context, lineIndex) !== null) {
       candidates.push({ from: currentLine.start, to: currentLine.end });
     }
-    candidates.push(...headingHierarchyRanges(lines, lineIndex));
+    candidates.push(...headingHierarchyRanges(context, lineIndex));
   } else {
     if (current.from !== current.to) {
       candidates.push(expandAdjacentBoundaries(text, current, rules));
@@ -527,10 +592,10 @@ export function expandSelection(
     }
   }
 
-  if (!fenceContext && !latexRange && !listScope && !headingScope) {
+  if (!fenceContext && latexRanges.length === 0 && !listScope && !headingScope) {
     if (rules.line) {
       candidates.push(getCodeLineRange(text, current));
-      candidates.push(expandParagraph(text, current));
+      candidates.push(expandParagraph(context, current));
     }
   }
   candidates.push(expandDocument(text));
@@ -578,5 +643,3 @@ export function offsetToPosition(text: string, offset: number): TextPosition {
 export function getDefaultSelectionRules(): SelectionRules {
   return { ...DEFAULT_RULES };
 }
-
-export const latexInlineDelimiters = LATEX_INLINE_DELIMITERS;

@@ -15,7 +15,8 @@ const PUNCTUATION = /[\p{P}\p{S}]/u;
 const WHITESPACE = /\s/u;
 const WORD = /[\p{L}\p{M}\p{N}_]/u;
 const LIST_MARKER = /^(\s*)(?:(?:[-+*]|\d+[.)])\s+)/u;
-const FENCE_MARKER = /^\s{0,3}(`{3,}|~{3,})/u;
+const FENCE_OPEN_MARKER = /^\s{0,3}(`{3,}|~{3,})(.*)$/u;
+const FENCE_CLOSE_MARKER = /^\s{0,3}(`{3,}|~{3,})\s*$/u;
 const LATEX_BLOCK_START = /^\s*\\(?:begin\{([^}]+)\}|\[)/u;
 const LATEX_BLOCK_END = /^\s*\\(?:end\{([^}]+)\}|\])/u;
 function clamp(value, min, max) {
@@ -41,7 +42,9 @@ function isAllowedBoundaryCharacter(character, rules) {
     return false;
 }
 function lineStart(text, offset) {
-    const start = text.lastIndexOf("\n", Math.max(0, offset - 1));
+    if (offset <= 0)
+        return 0;
+    const start = text.lastIndexOf("\n", offset - 1);
     return start === -1 ? 0 : start + 1;
 }
 function lineEnd(text, offset) {
@@ -78,43 +81,80 @@ function trimOuterWhitespace(text, range) {
         to -= 1;
     return { from, to };
 }
-function parseFenceContexts(text) {
+function parseFenceContexts(lines, textLength) {
     const contexts = [];
     let openStart = null;
+    let openLine = -1;
     let fenceCharacter = "";
     let fenceLength = 0;
-    for (const line of getLines(text)) {
-        const match = line.text.match(FENCE_MARKER);
-        if (!match)
-            continue;
-        const marker = match[1];
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
         if (openStart === null) {
+            const openMatch = line.text.match(FENCE_OPEN_MARKER);
+            if (!openMatch)
+                continue;
+            const marker = openMatch[1];
+            const infoString = openMatch[2] ?? "";
+            if (marker[0] === "`" && infoString.includes("`"))
+                continue;
             openStart = line.start;
+            openLine = index;
             fenceCharacter = marker[0];
             fenceLength = marker.length;
             continue;
         }
+        const closeMatch = line.text.match(FENCE_CLOSE_MARKER);
+        if (!closeMatch)
+            continue;
+        const marker = closeMatch[1];
         if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
+            const contentRange = openLine + 1 <= index - 1
+                ? { from: lines[openLine + 1].start, to: lines[index - 1].end }
+                : null;
             contexts.push({
-                range: { from: openStart, to: line.end }
+                range: { from: openStart, to: line.end },
+                contentRange,
+                startLine: openLine,
+                endLine: index
             });
             openStart = null;
+            openLine = -1;
             fenceCharacter = "";
             fenceLength = 0;
         }
     }
     if (openStart !== null) {
+        const contentRange = openLine + 1 < lines.length
+            ? { from: lines[openLine + 1].start, to: textLength }
+            : null;
         contexts.push({
-            range: { from: openStart, to: text.length }
+            range: { from: openStart, to: textLength },
+            contentRange,
+            startLine: openLine,
+            endLine: Math.max(openLine, lines.length - 1)
         });
     }
     return contexts;
 }
-function parseLatexRanges(text) {
-    const ranges = [];
+function createDocumentContext(text) {
     const lines = getLines(text);
+    const fences = parseFenceContexts(lines, text.length);
+    return { text, lines, fences };
+}
+function isLineInsideFence(fences, lineIndex) {
+    return fences.some((fence) => lineIndex >= fence.startLine && lineIndex <= fence.endLine);
+}
+function rangeOverlapsFence(fences, range) {
+    return fences.some((fence) => range.from < fence.range.to && range.to > fence.range.from);
+}
+function parseLatexRanges(context) {
+    const { text, lines, fences } = context;
+    const ranges = [];
     const stack = [];
-    for (const line of lines) {
+    for (let index = 0; index < lines.length; index += 1) {
+        if (isLineInsideFence(fences, index))
+            continue;
+        const line = lines[index];
         const startMatch = line.text.match(LATEX_BLOCK_START);
         if (startMatch) {
             stack.push({ start: line.start, environment: startMatch[1] ?? null });
@@ -133,18 +173,21 @@ function parseLatexRanges(text) {
         if (opening)
             ranges.push({ from: opening.start, to: text.length });
     }
-    const inlinePattern = /\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?<!\$)\$(?!\$)[^\n$]+(?<!\$)\$(?!\$)/gu;
+    const inlinePattern = /\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?<![\\$])\$(?!\$|\s)(?:[^$\n\\]|\\.)*?(?<!\s|\\)\$(?!\$|\d)/gu;
     for (const match of text.matchAll(inlinePattern)) {
         const from = match.index ?? 0;
-        ranges.push({ from, to: from + match[0].length });
+        const candidate = { from, to: from + match[0].length };
+        if (rangeOverlapsFence(fences, candidate))
+            continue;
+        ranges.push(candidate);
     }
-    return ranges.sort((left, right) => left.from - right.from || left.to - right.to);
+    return ranges.sort((left, right) => left.to - left.from - (right.to - right.from) || right.from - left.from);
 }
-function findContainingLatexRange(text, range) {
-    return parseLatexRanges(text).find((candidate) => rangeContains(candidate, range)) ?? null;
+function findContainingLatexRanges(context, range) {
+    return parseLatexRanges(context).filter((candidate) => rangeContains(candidate, range));
 }
-function findContainingFenceContext(text, range) {
-    return parseFenceContexts(text).find((context) => rangeContains(context.range, range)) ?? null;
+function findContainingFenceContext(context, range) {
+    return context.fences.find((fence) => rangeContains(fence.range, range)) ?? null;
 }
 function getListInfo(lineText) {
     const match = lineText.match(LIST_MARKER);
@@ -180,30 +223,34 @@ function listBlockForLine(lines, index, indent) {
     }
     return { from: lines[first].start, to: lines[last].end };
 }
-function headingLevel(lineText) {
-    const match = lineText.match(/^\s{0,3}(#{1,6})(?:\s+|$)/u);
+function headingLevelAt(context, index) {
+    if (index < 0 || index >= context.lines.length)
+        return null;
+    if (isLineInsideFence(context.fences, index))
+        return null;
+    const match = context.lines[index].text.match(/^\s{0,3}(#{1,6})(?:\s+|$)/u);
     return match ? match[1].length : null;
 }
-function headingSectionForLine(lines, index) {
-    const level = headingLevel(lines[index]?.text ?? "");
+function headingSectionForLine(context, index) {
+    const level = headingLevelAt(context, index);
     if (level === null)
         return null;
     let nextHeading = index + 1;
-    while (nextHeading < lines.length) {
-        const nextLevel = headingLevel(lines[nextHeading].text);
+    while (nextHeading < context.lines.length) {
+        const nextLevel = headingLevelAt(context, nextHeading);
         if (nextLevel !== null && nextLevel <= level)
             break;
         nextHeading += 1;
     }
-    const last = nextHeading < lines.length ? nextHeading - 1 : lines.length - 1;
-    return { from: lines[index].start, to: lines[last].end };
+    const last = nextHeading < context.lines.length ? nextHeading - 1 : context.lines.length - 1;
+    return { from: context.lines[index].start, to: context.lines[last].end };
 }
-function headingHierarchyRanges(lines, index) {
+function headingHierarchyRanges(context, index) {
     let headingIndex = index;
-    let level = headingLevel(lines[headingIndex]?.text ?? "");
+    let level = headingLevelAt(context, headingIndex);
     if (level === null) {
         for (let lineIndex = index - 1; lineIndex >= 0; lineIndex -= 1) {
-            const candidateLevel = headingLevel(lines[lineIndex].text);
+            const candidateLevel = headingLevelAt(context, lineIndex);
             if (candidateLevel !== null) {
                 headingIndex = lineIndex;
                 level = candidateLevel;
@@ -214,7 +261,7 @@ function headingHierarchyRanges(lines, index) {
     if (level === null)
         return [];
     const ranges = [];
-    const currentSection = headingSectionForLine(lines, headingIndex);
+    const currentSection = headingSectionForLine(context, headingIndex);
     if (currentSection)
         ranges.push(currentSection);
     let childIndex = headingIndex;
@@ -223,7 +270,7 @@ function headingHierarchyRanges(lines, index) {
         let parentIndex = childIndex - 1;
         let parentLevel = null;
         while (parentIndex >= 0) {
-            const candidateLevel = headingLevel(lines[parentIndex].text);
+            const candidateLevel = headingLevelAt(context, parentIndex);
             if (candidateLevel !== null && candidateLevel < childLevel) {
                 parentLevel = candidateLevel;
                 break;
@@ -232,7 +279,7 @@ function headingHierarchyRanges(lines, index) {
         }
         if (parentIndex < 0 || parentLevel === null)
             break;
-        const parentSection = headingSectionForLine(lines, parentIndex);
+        const parentSection = headingSectionForLine(context, parentIndex);
         if (parentSection)
             ranges.push(parentSection);
         childIndex = parentIndex;
@@ -301,11 +348,11 @@ function expandToken(text, range, rules) {
         to += 1;
     return { from, to };
 }
-function expandParagraph(text, range) {
+function expandParagraph(context, range) {
+    const { text, lines } = context;
     const startLine = lineNumberAt(text, range.from);
-    const endOffset = Math.max(range.from, range.to - 1);
+    const endOffset = range.to > range.from ? range.to - 1 : range.from;
     const endLine = lineNumberAt(text, endOffset);
-    const lines = getLines(text);
     let first = startLine;
     let last = endLine;
     while (first > 0 && !isBlankLine(lines[first - 1].text))
@@ -320,8 +367,8 @@ function expandDocument(text) {
 function rangeContains(outer, inner) {
     return outer.from <= inner.from && outer.to >= inner.to;
 }
-function getListExpansionRanges(text, range) {
-    const lines = getLines(text);
+function getListExpansionRanges(context, range) {
+    const { text, lines } = context;
     const lineIndex = lineNumberAt(text, clamp(range.from, 0, text.length));
     const currentLine = lines[lineIndex];
     const current = getListInfo(currentLine?.text ?? "");
@@ -357,7 +404,8 @@ function getListExpansionRanges(text, range) {
 }
 function getCodeLineRange(text, range) {
     const start = lineStart(text, range.from);
-    const end = lineEnd(text, Math.max(range.from, range.to));
+    const endCursor = range.to > range.from && text[range.to - 1] === "\n" ? range.to - 1 : range.to;
+    const end = lineEnd(text, Math.max(range.from, endCursor));
     return { from: start, to: end };
 }
 function addSurroundingPairRanges(text, range, includeMarkdownDelimiters = true) {
@@ -442,36 +490,39 @@ function getSelectionRange(selection) {
 function expandSelection(text, selection, inputRules = DEFAULT_RULES) {
     const rules = { ...DEFAULT_RULES, ...inputRules };
     const current = normalizeRange(getSelectionRange(selection), text.length);
+    const context = createDocumentContext(text);
     const candidates = [];
     const cursor = current.from;
-    const fenceContext = rules.code ? findContainingFenceContext(text, current) : null;
-    const latexRange = rules.latex ? findContainingLatexRange(text, current) : null;
-    const lines = getLines(text);
+    const fenceContext = rules.code ? findContainingFenceContext(context, current) : null;
+    const latexRanges = rules.latex ? findContainingLatexRanges(context, current) : [];
     const lineIndex = lineNumberAt(text, clamp(current.from, 0, text.length));
-    const currentLine = lines[lineIndex];
+    const currentLine = context.lines[lineIndex];
     const listScope = rules.list && !!getListInfo(currentLine?.text ?? "");
-    const headingScope = rules.heading && (headingLevel(currentLine?.text ?? "") !== null || headingHierarchyRanges(lines, lineIndex).length > 0);
+    const headingScope = rules.heading &&
+        (headingLevelAt(context, lineIndex) !== null || headingHierarchyRanges(context, lineIndex).length > 0);
     if (current.from === current.to)
         candidates.push(expandWord(text, cursor));
     if (fenceContext) {
         candidates.push(...addCodePairRanges(text, current));
         candidates.push(getCodeLineRange(text, current));
+        if (fenceContext.contentRange)
+            candidates.push(fenceContext.contentRange);
         candidates.push(fenceContext.range);
     }
-    else if (latexRange) {
+    else if (latexRanges.length > 0) {
         candidates.push(...addSurroundingPairRanges(text, current, false));
-        candidates.push(latexRange);
+        candidates.push(...latexRanges);
         if (rules.line)
             candidates.push(getCodeLineRange(text, current));
     }
     else if (listScope) {
-        candidates.push(...getListExpansionRanges(text, current));
+        candidates.push(...getListExpansionRanges(context, current));
     }
     else if (headingScope) {
-        if (headingLevel(currentLine?.text ?? "") !== null) {
+        if (headingLevelAt(context, lineIndex) !== null) {
             candidates.push({ from: currentLine.start, to: currentLine.end });
         }
-        candidates.push(...headingHierarchyRanges(lines, lineIndex));
+        candidates.push(...headingHierarchyRanges(context, lineIndex));
     }
     else {
         if (current.from !== current.to) {
@@ -481,10 +532,10 @@ function expandSelection(text, selection, inputRules = DEFAULT_RULES) {
             candidates.push(expandToken(text, current, rules));
         }
     }
-    if (!fenceContext && !latexRange && !listScope && !headingScope) {
+    if (!fenceContext && latexRanges.length === 0 && !listScope && !headingScope) {
         if (rules.line) {
             candidates.push(getCodeLineRange(text, current));
-            candidates.push(expandParagraph(text, current));
+            candidates.push(expandParagraph(context, current));
         }
     }
     candidates.push(expandDocument(text));

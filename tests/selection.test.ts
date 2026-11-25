@@ -142,3 +142,45 @@ test("converts between line/ch positions and offsets", () => {
   assert.equal(positionToOffset(text, { line: 1, ch: 1 }), 4);
   assert.deepEqual(offsetToPosition(text, 4), { line: 1, ch: 1 });
 });
+
+test("ignores hash comments inside fenced code blocks when computing heading sections", () => {
+  const text = "## Section\n\n```python\n# not a heading\nx = 1\n```\n\nafter code\n\n## Next";
+  const heading = at(text, "Section");
+  const headingLine = expandSelection(text, heading, allRules);
+  const section = expandSelection(text, { anchor: headingLine.from, head: headingLine.to }, allRules);
+  assert.equal(selected(text, headingLine), "## Section");
+  assert.equal(selected(text, section), "## Section\n\n```python\n# not a heading\nx = 1\n```\n\nafter code\n");
+});
+
+test("expands multi-line code block body before including fences and requires clean closing fences", () => {
+  const text = "````markdown\n```ts\nconst x = 1;\n```\n````";
+  const value = at(text, "x");
+  const line = expandSelection(text, value, allRules);
+  const body = expandSelection(text, { anchor: line.from, head: line.to }, allRules);
+  const fence = expandSelection(text, { anchor: body.from, head: body.to }, allRules);
+  assert.equal(selected(text, line), "const x = 1;");
+  assert.equal(selected(text, body), "```ts\nconst x = 1;\n```");
+  assert.equal(selected(text, fence), text);
+});
+
+test("expands nested LaTeX environments innermost-first and ignores currency dollars", () => {
+  const nestedLatex = "$$\n\\begin{aligned}\na + b = c\n\\end{aligned}\n$$";
+  const b = at(nestedLatex, "b");
+  const innerEnv = expandSelection(nestedLatex, b, allRules);
+  const outerBlock = expandSelection(nestedLatex, { anchor: innerEnv.from, head: innerEnv.to }, allRules);
+  assert.equal(selected(nestedLatex, innerEnv), "\\begin{aligned}\na + b = c\n\\end{aligned}");
+  assert.equal(selected(nestedLatex, outerBlock), nestedLatex);
+
+  const currency = "苹果 $5 和香蕉 $10 都很好吃。";
+  const middle = at(currency, "和香蕉");
+  const next = expandSelection(currency, middle, allRules);
+  assert.notEqual(selected(currency, next), "$5 和香蕉 $");
+});
+
+test("handles leading blank lines without lineStart overflow", () => {
+  const text = "\nabc";
+  const first = expandSelection(text, { anchor: 0, head: 0 }, allRules);
+  assert.equal(selected(text, first), "\n");
+  const second = expandSelection(text, { anchor: first.from, head: first.to }, allRules);
+  assert.equal(selected(text, second), "\nabc");
+});
