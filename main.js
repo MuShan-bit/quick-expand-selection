@@ -408,72 +408,251 @@ function getCodeLineRange(text, range) {
     const end = lineEnd(text, Math.max(range.from, endCursor));
     return { from: start, to: end };
 }
-function addSurroundingPairRanges(text, range, includeMarkdownDelimiters = true) {
+function isEscaped(text, index) {
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+        backslashes += 1;
+    }
+    return backslashes % 2 === 1;
+}
+function pushPairWithInner(ranges, openStart, openEnd, closeStart, closeEnd, target) {
+    if (openEnd < closeStart) {
+        const inner = { from: openEnd, to: closeStart };
+        if (rangeContains(inner, target))
+            ranges.push(inner);
+    }
+    const outer = { from: openStart, to: closeEnd };
+    if (rangeContains(outer, target))
+        ranges.push(outer);
+}
+function sortRangesInnermostFirst(ranges) {
+    return ranges.sort((left, right) => left.to - left.from - (right.to - right.from) || right.from - left.from);
+}
+const ASYMMETRIC_OPENERS = new Set(["(", "[", "{", "（", "【", "「", "『", "《", "“", "‘"]);
+const ASYMMETRIC_CLOSING_TO_OPENING = {
+    ")": "(",
+    "]": "[",
+    "}": "{",
+    "）": "（",
+    "】": "【",
+    "」": "「",
+    "』": "『",
+    "》": "《",
+    "”": "“",
+    "’": "‘"
+};
+function addAsymmetricPairRanges(text, scope, range) {
     const ranges = [];
     const stack = [];
-    const closingToOpening = { ")": "(", "]": "[", "}": "{" };
-    for (let index = 0; index < text.length; index += 1) {
-        if (text[index - 1] === "\\")
+    for (let index = scope.from; index < scope.to; index += 1) {
+        if (isEscaped(text, index))
             continue;
         const character = text[index];
-        if (character === "(" || character === "[" || character === "{") {
+        if (ASYMMETRIC_OPENERS.has(character)) {
             stack.push({ opening: character, index });
             continue;
         }
-        const opening = closingToOpening[character];
+        const opening = ASYMMETRIC_CLOSING_TO_OPENING[character];
         if (!opening)
             continue;
         for (let stackIndex = stack.length - 1; stackIndex >= 0; stackIndex -= 1) {
             if (stack[stackIndex].opening !== opening)
                 continue;
-            const pair = { from: stack[stackIndex].index, to: index + 1 };
-            if (rangeContains(pair, range))
-                ranges.push(pair);
+            const openIndex = stack[stackIndex].index;
             stack.splice(stackIndex, 1);
+            // Skip the half-bracket pair inside Obsidian wikilinks like [[Note|Alias]]
+            const isInnerOfWikilink = opening === "[" &&
+                openIndex > scope.from &&
+                index + 1 < scope.to &&
+                text[openIndex - 1] === "[" &&
+                text[index + 1] === "]";
+            if (isInnerOfWikilink) {
+                if (openIndex + 1 < index) {
+                    const inner = { from: openIndex + 1, to: index };
+                    if (rangeContains(inner, range))
+                        ranges.push(inner);
+                }
+                break;
+            }
+            const isOuterOfWikilink = opening === "[" &&
+                openIndex + 1 < index &&
+                text[openIndex + 1] === "[" &&
+                text[index - 1] === "]";
+            if (isOuterOfWikilink) {
+                pushPairWithInner(ranges, openIndex, openIndex + 2, index - 1, index + 1, range);
+                break;
+            }
+            pushPairWithInner(ranges, openIndex, openIndex + 1, index, index + 1, range);
             break;
         }
     }
-    if (!includeMarkdownDelimiters)
-        return ranges;
-    for (const delimiter of ["`", "*", "_", "~"]) {
-        let opening = -1;
-        for (let index = 0; index < text.length; index += 1) {
-            if (text[index] !== delimiter || text[index - 1] === "\\")
-                continue;
-            if (opening === -1) {
-                opening = index;
-            }
-            else {
-                const pair = { from: opening, to: index + 1 };
-                if (rangeContains(pair, range))
-                    ranges.push(pair);
-                opening = -1;
-            }
-        }
-    }
     return ranges;
 }
-function addQuotedRanges(text, range) {
+function addInlineMarkdownDelimiterRanges(text, scope, range) {
     const ranges = [];
-    for (const quote of ["\"", "'"]) {
-        let opening = -1;
-        for (let index = 0; index < text.length; index += 1) {
-            if (text[index] !== quote || text[index - 1] === "\\")
-                continue;
-            if (opening === -1) {
-                opening = index;
+    const scopeText = text.slice(scope.from, scope.to);
+    const lines = getLines(scopeText);
+    for (const line of lines) {
+        const lineAbsStart = scope.from + line.start;
+        const lineAbsEnd = scope.from + line.end;
+        if (range.to < lineAbsStart || range.from > lineAbsEnd)
+            continue;
+        // Skip leading list marker so "* item" does not act as an italic delimiter
+        const listInfo = getListInfo(line.text);
+        const contentOffset = listInfo ? listInfo.contentStart : 0;
+        const startIdx = lineAbsStart + contentOffset;
+        // Inline code spans (`...`, ``...``)
+        let index = startIdx;
+        while (index < lineAbsEnd) {
+            if (text[index] === "`" && !isEscaped(text, index)) {
+                let ticks = 1;
+                while (index + ticks < lineAbsEnd && text[index + ticks] === "`")
+                    ticks += 1;
+                const marker = "`".repeat(ticks);
+                let search = index + ticks;
+                let close = -1;
+                while (search <= lineAbsEnd - ticks) {
+                    if (text.startsWith(marker, search) && !isEscaped(text, search)) {
+                        const beforeOk = search === 0 || text[search - 1] !== "`";
+                        const afterOk = search + ticks >= lineAbsEnd || text[search + ticks] !== "`";
+                        if (beforeOk && afterOk) {
+                            close = search;
+                            break;
+                        }
+                    }
+                    search += 1;
+                }
+                if (close !== -1) {
+                    pushPairWithInner(ranges, index, index + ticks, close, close + ticks, range);
+                    index = close + ticks;
+                    continue;
+                }
+                index += ticks;
                 continue;
             }
-            const candidate = { from: opening, to: index + 1 };
-            if (rangeContains(candidate, range))
-                ranges.push(candidate);
-            opening = -1;
+            index += 1;
+        }
+        // Emphasis / highlight / strikethrough delimiters (longest first)
+        const delimiters = ["***", "___", "**", "__", "~~", "==", "*", "_", "~"];
+        for (const delimiter of delimiters) {
+            const len = delimiter.length;
+            const ch = delimiter[0];
+            let open = -1;
+            for (let pos = startIdx; pos <= lineAbsEnd - len; pos += 1) {
+                if (!text.startsWith(delimiter, pos) || isEscaped(text, pos))
+                    continue;
+                // Require exact run length so "**" is not also matched as two "*"
+                if (pos > startIdx && text[pos - 1] === ch)
+                    continue;
+                if (pos + len < lineAbsEnd && text[pos + len] === ch)
+                    continue;
+                // Avoid matching intra-word underscores like foo_bar_baz
+                if (ch === "_" &&
+                    pos > startIdx &&
+                    pos + len < lineAbsEnd &&
+                    isWord(text[pos - 1]) &&
+                    isWord(text[pos + len])) {
+                    continue;
+                }
+                if (open === -1) {
+                    const nextChar = text[pos + len];
+                    if (nextChar && !isWhitespace(nextChar)) {
+                        open = pos;
+                        pos += len - 1;
+                    }
+                }
+                else {
+                    const prevChar = text[pos - 1];
+                    if (prevChar && !isWhitespace(prevChar)) {
+                        pushPairWithInner(ranges, open, open + len, pos, pos + len, range);
+                        open = -1;
+                        pos += len - 1;
+                    }
+                }
+            }
+        }
+        // Straight quotes on the same line, ignoring apostrophes like don't
+        for (const quote of ["\"", "'"]) {
+            let open = -1;
+            for (let pos = startIdx; pos < lineAbsEnd; pos += 1) {
+                if (text[pos] !== quote || isEscaped(text, pos))
+                    continue;
+                if (quote === "'" &&
+                    pos > startIdx &&
+                    pos + 1 < lineAbsEnd &&
+                    isWord(text[pos - 1]) &&
+                    isWord(text[pos + 1])) {
+                    continue;
+                }
+                if (open === -1) {
+                    open = pos;
+                }
+                else {
+                    pushPairWithInner(ranges, open, open + 1, pos, pos + 1, range);
+                    open = -1;
+                }
+            }
         }
     }
     return ranges;
 }
-function addCodePairRanges(text, range) {
-    return [...addSurroundingPairRanges(text, range, false), ...addQuotedRanges(text, range)];
+function addSurroundingPairRanges(text, range, includeMarkdownDelimiters = true, scope = { from: 0, to: text.length }) {
+    const ranges = addAsymmetricPairRanges(text, scope, range);
+    if (includeMarkdownDelimiters) {
+        ranges.push(...addInlineMarkdownDelimiterRanges(text, scope, range));
+    }
+    return sortRangesInnermostFirst(ranges);
+}
+function addCodePairRanges(text, range, scope = { from: 0, to: text.length }) {
+    const ranges = [];
+    const bracketStack = [];
+    const codeClosingToOpening = { ")": "(", "]": "[", "}": "{" };
+    let activeQuote = null;
+    let quoteStart = -1;
+    for (let index = scope.from; index < scope.to; index += 1) {
+        const character = text[index];
+        if (activeQuote !== null) {
+            if (character === "\n" && activeQuote !== "`") {
+                activeQuote = null;
+                quoteStart = -1;
+                continue;
+            }
+            if (character === activeQuote && !isEscaped(text, index)) {
+                pushPairWithInner(ranges, quoteStart, quoteStart + 1, index, index + 1, range);
+                activeQuote = null;
+                quoteStart = -1;
+            }
+            continue;
+        }
+        if (isEscaped(text, index))
+            continue;
+        if (character === "`" && text[index + 1] === "`" && text[index + 2] === "`") {
+            while (index + 1 < scope.to && text[index + 1] === "`")
+                index += 1;
+            continue;
+        }
+        if (character === "\"" || character === "'" || character === "`") {
+            activeQuote = character;
+            quoteStart = index;
+            continue;
+        }
+        if (character === "(" || character === "[" || character === "{") {
+            bracketStack.push({ opening: character, index });
+            continue;
+        }
+        const opening = codeClosingToOpening[character];
+        if (!opening)
+            continue;
+        for (let stackIndex = bracketStack.length - 1; stackIndex >= 0; stackIndex -= 1) {
+            if (bracketStack[stackIndex].opening !== opening)
+                continue;
+            const openIndex = bracketStack[stackIndex].index;
+            pushPairWithInner(ranges, openIndex, openIndex + 1, index, index + 1, range);
+            bracketStack.splice(stackIndex, 1);
+            break;
+        }
+    }
+    return sortRangesInnermostFirst(ranges);
 }
 function normalizeRange(range, textLength) {
     return {
@@ -503,14 +682,25 @@ function expandSelection(text, selection, inputRules = DEFAULT_RULES) {
     if (current.from === current.to)
         candidates.push(expandWord(text, cursor));
     if (fenceContext) {
-        candidates.push(...addCodePairRanges(text, current));
-        candidates.push(getCodeLineRange(text, current));
+        const codeScope = fenceContext.contentRange ?? fenceContext.range;
+        const codePairs = addCodePairRanges(text, current, codeScope);
+        const codeLine = getCodeLineRange(text, current);
+        const inlinePairs = codeLine
+            ? codePairs.filter((pair) => rangeContains(codeLine, pair))
+            : codePairs;
+        const multilinePairs = codeLine
+            ? codePairs.filter((pair) => !rangeContains(codeLine, pair))
+            : [];
+        candidates.push(...inlinePairs);
+        candidates.push(codeLine);
+        candidates.push(...multilinePairs);
         if (fenceContext.contentRange)
             candidates.push(fenceContext.contentRange);
         candidates.push(fenceContext.range);
     }
     else if (latexRanges.length > 0) {
-        candidates.push(...addSurroundingPairRanges(text, current, false));
+        const latexScope = latexRanges[latexRanges.length - 1];
+        candidates.push(...addSurroundingPairRanges(text, current, false, latexScope));
         candidates.push(...latexRanges);
         if (rules.line)
             candidates.push(getCodeLineRange(text, current));
@@ -526,9 +716,10 @@ function expandSelection(text, selection, inputRules = DEFAULT_RULES) {
     }
     else {
         if (current.from !== current.to) {
+            const paragraphScope = expandParagraph(context, current) ?? { from: 0, to: text.length };
+            candidates.push(...addSurroundingPairRanges(text, current, true, paragraphScope));
             candidates.push(expandAdjacentBoundaries(text, current, rules));
             candidates.push(expandBoundaryRun(text, current, rules));
-            candidates.push(addSurroundingPairRanges(text, current)[0] ?? null);
             candidates.push(expandToken(text, current, rules));
         }
     }

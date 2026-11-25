@@ -184,3 +184,40 @@ test("handles leading blank lines without lineStart overflow", () => {
   const second = expandSelection(text, { anchor: first.from, head: first.to }, allRules);
   assert.equal(selected(text, second), "\nabc");
 });
+
+test("matches multi-character Markdown delimiters inner-then-outer", () => {
+  const text = "这里有 **bold text** 和 ~~strike text~~ 和 ==highlight text== 测试。";
+  const bold = at(text, "bold");
+  const inner = expandSelection(text, bold, allRules);
+  const outer = expandSelection(text, { anchor: inner.from, head: inner.to }, allRules);
+  assert.equal(selected(text, inner), "bold text");
+  assert.equal(selected(text, outer), "**bold text**");
+
+  const strike = at(text, "strike");
+  const strikeInner = expandSelection(text, strike, allRules);
+  const strikeOuter = expandSelection(text, { anchor: strikeInner.from, head: strikeInner.to }, allRules);
+  assert.equal(selected(text, strikeInner), "strike text");
+  assert.equal(selected(text, strikeOuter), "~~strike text~~");
+});
+
+test("matches CJK brackets and Obsidian wikilinks inner-then-outer", () => {
+  const text = "参考（中文括号）和 [[Note|Alias]] 链接";
+  const cjk = at(text, "中文");
+  const cjkInner = expandSelection(text, cjk, allRules);
+  const cjkOuter = expandSelection(text, { anchor: cjkInner.from, head: cjkInner.to }, allRules);
+  assert.equal(selected(text, cjkInner), "中文括号");
+  assert.equal(selected(text, cjkOuter), "（中文括号）");
+
+  const alias = at(text, "Alias");
+  const wikiInner = expandSelection(text, alias, allRules);
+  const wikiOuter = expandSelection(text, { anchor: wikiInner.from, head: wikiInner.to }, allRules);
+  assert.equal(selected(text, wikiInner), "Note|Alias");
+  assert.equal(selected(text, wikiOuter), "[[Note|Alias]]");
+});
+
+test("handles apostrophes inside double-quoted strings in code blocks", () => {
+  const text = "```ts\nconst msg = \"don't break quotes\";\nconst word = 'hello';\n```";
+  const hello = at(text, "hello");
+  const quoted = expandSelection(text, hello, allRules);
+  assert.equal(selected(text, quoted), "'hello'");
+});
